@@ -17,6 +17,15 @@ import {
   Settings,
   Radio,
   ChevronRight,
+  DollarSign,
+  Film,
+  Library,
+  UserCheck,
+  CalendarDays,
+  BookOpen,
+  Sparkles,
+  BrainCircuit,
+  MapPin,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 
@@ -24,32 +33,62 @@ const navItems = [
   {
     group: "COMMAND CENTER",
     items: [
-      { href: "/dashboard",      label: "Overview",      icon: LayoutDashboard },
-      { href: "/tracks",         label: "Track Intel",   icon: Music2 },
-      { href: "/platforms",      label: "Platforms",     icon: BarChart3 },
-      { href: "/regions",        label: "Regions",       icon: Globe },
+      { href: "/dashboard",      label: "Overview",         icon: LayoutDashboard },
+      { href: "/tracks",         label: "Track Intel",      icon: Music2 },
+      { href: "/platforms",      label: "Platforms",        icon: BarChart3 },
+      { href: "/regions",        label: "Regions",          icon: Globe },
+    ],
+  },
+  {
+    group: "REVENUE INTELLIGENCE",
+    items: [
+      { href: "/royalties",       label: "Royalties",        icon: DollarSign,   badge: "NEW" },
+      { href: "/royalty-sources", label: "DSP Sources",      icon: BarChart3 },
+      { href: "/royalty-reports", label: "Reports",          icon: BookOpen },
+    ],
+  },
+  {
+    group: "SYNC ENGINE",
+    items: [
+      { href: "/sync-pitches",       label: "Pitch Tracker",   icon: Film,       badge: "NEW" },
+      { href: "/sync-library",       label: "Sync Library",    icon: Library },
+      { href: "/music-supervisors",  label: "Supervisors",     icon: UserCheck },
+    ],
+  },
+  {
+    group: "RELEASE OS",
+    items: [
+      { href: "/releases",  label: "Releases",     icon: CalendarDays, badge: "NEW" },
+    ],
+  },
+  {
+    group: "CATALOG",
+    items: [
+      { href: "/catalog",          label: "Catalog",          icon: BookOpen,   badge: "NEW" },
+      { href: "/catalog-insights", label: "Catalog Insights", icon: Sparkles },
     ],
   },
   {
     group: "AUDIENCE",
     items: [
-      { href: "/fans",           label: "Fan CRM",       icon: Users,      badge: "10" },
-      { href: "/smart-links",    label: "Smart Links",   icon: Link2 },
+      { href: "/fan-intel",    label: "Fan Intel",    icon: BrainCircuit, badge: "NEW" },
+      { href: "/fans",         label: "Fan CRM",      icon: Users,        badge: "10" },
+      { href: "/smart-links",  label: "Smart Links",  icon: Link2 },
     ],
   },
   {
     group: "GROWTH ENGINE",
     items: [
-      { href: "/campaigns",      label: "Campaigns",     icon: Megaphone },
-      { href: "/automations",    label: "Autopilot",     icon: Zap,        badge: "3 ON" },
-      { href: "/insights",       label: "Insights",      icon: Lightbulb,  badge: "5" },
+      { href: "/campaigns",     label: "Campaigns",   icon: Megaphone },
+      { href: "/automations",   label: "Autopilot",   icon: Zap,        badge: "3 ON" },
+      { href: "/insights",      label: "Insights",    icon: Lightbulb,  badge: "5" },
     ],
   },
   {
     group: "SYSTEM",
     items: [
-      { href: "/notifications",  label: "Notifications", icon: Bell,       badge: "4" },
-      { href: "/settings",       label: "Settings",      icon: Settings },
+      { href: "/notifications", label: "Notifications", icon: Bell,     badge: "4" },
+      { href: "/settings",      label: "Settings",      icon: Settings },
     ],
   },
 ];
@@ -66,12 +105,12 @@ export function Sidebar() {
         </div>
         <div>
           <div className="text-sm font-bold tracking-widest text-foreground">REVERBZN</div>
-          <div className="text-[10px] font-mono text-muted-foreground tracking-widest uppercase">OS v1.0</div>
+          <div className="text-[10px] font-mono text-muted-foreground tracking-widest uppercase">OS v2.0</div>
         </div>
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 px-3 py-4 space-y-6">
+      <nav className="flex-1 px-3 py-4 space-y-5">
         {navItems.map((group) => (
           <div key={group.group}>
             <div className="px-2 mb-2 text-[9px] font-mono font-semibold tracking-widest text-muted-foreground/60 uppercase">
@@ -98,7 +137,9 @@ export function Sidebar() {
                         <Badge
                           className={cn(
                             "text-[10px] px-1.5 py-0 h-4 font-mono",
-                            isActive
+                            item.badge === "NEW"
+                              ? "bg-emerald/20 text-emerald border-emerald/30"
+                              : isActive
                               ? "bg-cyan/20 text-cyan border-cyan/30"
                               : "bg-white/5 text-muted-foreground border-white/10"
                           )}
@@ -126,7 +167,7 @@ export function Sidebar() {
             <div className="text-sm font-semibold text-foreground truncate">ReverbZn</div>
             <div className="flex items-center gap-1">
               <div className="w-1.5 h-1.5 rounded-full bg-emerald animate-pulse" />
-              <span className="text-[10px] font-mono text-muted-foreground">LIVE</span>
+              <span className="text-[10px] font-mono text-muted-foreground">ARTIST OS ACTIVE</span>
             </div>
           </div>
         </div>

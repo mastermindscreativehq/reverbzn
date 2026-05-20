@@ -4,7 +4,7 @@
 // ============================================================
 import { db } from "./client";
 import * as schema from "./schema";
-import { eq, desc, asc, and, gte, lte, isNull, isNotNull, sql, sum, avg, count } from "drizzle-orm";
+import { eq, desc, asc, and, gte, lte, isNull, isNotNull, sql, sum, avg, count, inArray } from "drizzle-orm";
 import { subDays, format } from "date-fns";
 
 function dStr(n: number) { return format(subDays(new Date(), n), "yyyy-MM-dd"); }
@@ -613,4 +613,508 @@ export async function getNotifications(artistId: string) {
     orderBy: desc(schema.notifications.createdAt),
     limit: 50,
   });
+}
+
+// ============================================================
+// INTELLIGENCE MODULES — Royalties · Catalog · Fan Intel
+//                        Releases · Sync
+// ============================================================
+
+const PLATFORM_NAMES: Record<string, string> = {
+  spotify: "Spotify", apple_music: "Apple Music", audiomack: "Audiomack",
+  boomplay: "Boomplay", youtube: "YouTube", soundcloud: "SoundCloud",
+};
+const PLATFORM_COLORS: Record<string, string> = {
+  spotify: "#1DB954", apple_music: "#FA243C", audiomack: "#FFA500",
+  boomplay: "#E2392E", youtube: "#FF0000", soundcloud: "#FF5500",
+};
+const COUNTRY_NAMES: Record<string, string> = {
+  NG: "Nigeria", GB: "United Kingdom", US: "United States", GH: "Ghana",
+  KE: "Kenya", ZA: "South Africa", CA: "Canada", AE: "UAE", DE: "Germany", FR: "France",
+};
+const FLAGS: Record<string, string> = {
+  NG: "🇳🇬", GB: "🇬🇧", GH: "🇬🇭", KE: "🇰🇪", US: "🇺🇸",
+  ZA: "🇿🇦", CA: "🇨🇦", DE: "🇩🇪", AE: "🇦🇪", FR: "🇫🇷",
+};
+
+// ── Royalties ─────────────────────────────────────────────────────────────────
+
+export async function getRoyaltyReportHistory(artistId: string) {
+  return db.select()
+    .from(schema.royaltyReports)
+    .where(eq(schema.royaltyReports.artistId, artistId))
+    .orderBy(asc(schema.royaltyReports.periodStart));
+}
+
+export async function getRoyaltySources(artistId: string) {
+  return db.select()
+    .from(schema.royaltySources)
+    .where(and(eq(schema.royaltySources.artistId, artistId), eq(schema.royaltySources.isActive, true)))
+    .orderBy(desc(schema.royaltySources.rpm));
+}
+
+export async function getRoyaltySourcesGrouped(artistId: string) {
+  const [sources, totals, territories] = await Promise.all([
+    getRoyaltySources(artistId),
+    db.select({
+      platformSlug: schema.royaltyEntries.platformSlug,
+      totalUsd:     sum(schema.royaltyEntries.royaltyUsd),
+      totalStreams:  sum(schema.royaltyEntries.streams),
+    })
+    .from(schema.royaltyEntries)
+    .where(eq(schema.royaltyEntries.artistId, artistId))
+    .groupBy(schema.royaltyEntries.platformSlug),
+
+    db.select({
+      platformSlug: schema.royaltyEntries.platformSlug,
+      territory:    schema.royaltyEntries.territory,
+      usd:          sum(schema.royaltyEntries.royaltyUsd),
+      streams:      sum(schema.royaltyEntries.streams),
+    })
+    .from(schema.royaltyEntries)
+    .where(and(eq(schema.royaltyEntries.artistId, artistId), isNotNull(schema.royaltyEntries.territory)))
+    .groupBy(schema.royaltyEntries.platformSlug, schema.royaltyEntries.territory)
+    .orderBy(desc(sum(schema.royaltyEntries.royaltyUsd))),
+  ]);
+
+  const totalsMap = new Map(totals.map(t => [t.platformSlug, {
+    usd: Number(t.totalUsd ?? 0), streams: Number(t.totalStreams ?? 0),
+  }]));
+
+  const territoryMap = new Map<string, { territory: string; streams: number; rpm: number; usd: number }[]>();
+  for (const t of territories) {
+    const arr = territoryMap.get(t.platformSlug) ?? [];
+    const s = Number(t.streams ?? 0);
+    const u = Number(t.usd ?? 0);
+    arr.push({ territory: t.territory ?? "Other", streams: s, usd: Math.round(u * 100) / 100, rpm: s > 0 ? Math.round((u / s) * 1000 * 100) / 100 : 0 });
+    territoryMap.set(t.platformSlug, arr);
+  }
+
+  const seen = new Set<string>();
+  return sources
+    .filter(s => { const first = !seen.has(s.platformSlug); seen.add(s.platformSlug); return first; })
+    .map(s => {
+      const total = totalsMap.get(s.platformSlug) ?? { usd: 0, streams: 0 };
+      return {
+        platform:    PLATFORM_NAMES[s.platformSlug] ?? s.platformSlug,
+        color:       PLATFORM_COLORS[s.platformSlug] ?? "#888",
+        slug:        s.platformSlug,
+        rpm:         Number(s.rpm ?? 0),
+        streams:     total.streams,
+        totalUsd:    Math.round(total.usd * 100) / 100,
+        territory:   s.territory ?? "Global",
+        payoutModel: s.payoutModel ?? "Per-stream",
+        status:      s.isActive ? "active" : "inactive",
+        breakdown:   (territoryMap.get(s.platformSlug) ?? []).slice(0, 6),
+      };
+    });
+}
+
+export async function getPayoutForecasts(artistId: string) {
+  return db.select()
+    .from(schema.payoutForecasts)
+    .where(eq(schema.payoutForecasts.artistId, artistId))
+    .orderBy(asc(schema.payoutForecasts.periodLabel))
+    .limit(3);
+}
+
+export async function getRoyaltyByPlatform(artistId: string) {
+  const rows = await db.select({
+    platformSlug: schema.royaltyEntries.platformSlug,
+    totalUsd:     sum(schema.royaltyEntries.royaltyUsd),
+  })
+  .from(schema.royaltyEntries)
+  .where(eq(schema.royaltyEntries.artistId, artistId))
+  .groupBy(schema.royaltyEntries.platformSlug)
+  .orderBy(desc(sum(schema.royaltyEntries.royaltyUsd)));
+
+  return rows.map(r => ({
+    label: PLATFORM_NAMES[r.platformSlug] ?? r.platformSlug,
+    value: Math.round(Number(r.totalUsd ?? 0) * 100) / 100,
+    color: PLATFORM_COLORS[r.platformSlug] ?? "#888",
+  }));
+}
+
+export async function getTopEarningTracks(artistId: string, limit = 5) {
+  const [trackTotals, platformRows] = await Promise.all([
+    db.select({
+      trackId:      schema.royaltyEntries.trackId,
+      trackTitle:   schema.tracks.title,
+      totalStreams:  sum(schema.royaltyEntries.streams),
+      totalRoyalty:  sum(schema.royaltyEntries.royaltyUsd),
+    })
+    .from(schema.royaltyEntries)
+    .innerJoin(schema.tracks, eq(schema.royaltyEntries.trackId, schema.tracks.id))
+    .where(eq(schema.royaltyEntries.artistId, artistId))
+    .groupBy(schema.royaltyEntries.trackId, schema.tracks.id, schema.tracks.title)
+    .orderBy(desc(sum(schema.royaltyEntries.royaltyUsd)))
+    .limit(limit),
+
+    db.select({
+      trackId:     schema.royaltyEntries.trackId,
+      platformSlug: schema.royaltyEntries.platformSlug,
+      total:       sum(schema.royaltyEntries.royaltyUsd),
+    })
+    .from(schema.royaltyEntries)
+    .where(eq(schema.royaltyEntries.artistId, artistId))
+    .groupBy(schema.royaltyEntries.trackId, schema.royaltyEntries.platformSlug)
+    .orderBy(desc(sum(schema.royaltyEntries.royaltyUsd))),
+  ]);
+
+  const topPlatformMap = new Map<string, string>();
+  for (const row of platformRows) {
+    if (row.trackId && !topPlatformMap.has(row.trackId)) {
+      topPlatformMap.set(row.trackId, row.platformSlug);
+    }
+  }
+
+  return trackTotals.map(t => {
+    const streams = Number(t.totalStreams ?? 0);
+    const royalty = Number(t.totalRoyalty ?? 0);
+    return {
+      title:    t.trackTitle,
+      plays:    streams,
+      rpm:      streams > 0 ? Math.round((royalty / streams) * 1000 * 100) / 100 : 0,
+      earnings: Math.round(royalty * 100) / 100,
+      platform: PLATFORM_NAMES[topPlatformMap.get(t.trackId ?? "") ?? ""] ?? "—",
+    };
+  });
+}
+
+export async function getRoyaltyByTerritory(artistId: string) {
+  const COLORS = ["#22d3ee", "#a78bfa", "#34d399", "#fbbf24", "#f87171", "#60a5fa", "#f472b6"];
+  const rows = await db.select({
+    territory: schema.royaltyEntries.territory,
+    total:     sum(schema.royaltyEntries.royaltyUsd),
+  })
+  .from(schema.royaltyEntries)
+  .where(and(eq(schema.royaltyEntries.artistId, artistId), isNotNull(schema.royaltyEntries.territory)))
+  .groupBy(schema.royaltyEntries.territory)
+  .orderBy(desc(sum(schema.royaltyEntries.royaltyUsd)))
+  .limit(7);
+
+  return rows.map((r, i) => ({
+    label: COUNTRY_NAMES[r.territory ?? ""] ?? r.territory ?? "Other",
+    value: Math.round(Number(r.total ?? 0) * 100) / 100,
+    color: COLORS[i % COLORS.length],
+  }));
+}
+
+// ── Catalog ───────────────────────────────────────────────────────────────────
+
+export async function getCatalogWithLifecycle(artistId: string) {
+  const [rows, insightRows, metricsRows] = await Promise.all([
+    db.select({
+      trackId:              schema.catalogTracks.trackId,
+      trackTitle:           schema.tracks.title,
+      trackSlug:            schema.tracks.slug,
+      genres:               schema.tracks.genres,
+      lifecyclePhase:       schema.catalogTracks.lifecyclePhase,
+      evergreenScore:       schema.catalogTracks.evergreenScore,
+      decayRatePct:         schema.catalogTracks.decayRatePct,
+      revivalPotential:     schema.catalogTracks.revivalPotential,
+      peakStreams:          schema.catalogTracks.peakStreams,
+      currentMonthlyStreams: schema.catalogTracks.currentMonthlyStreams,
+      totalPlaylists:       schema.catalogTracks.totalPlaylists,
+    })
+    .from(schema.catalogTracks)
+    .innerJoin(schema.tracks, eq(schema.catalogTracks.trackId, schema.tracks.id))
+    .where(eq(schema.catalogTracks.artistId, artistId)),
+
+    db.select({ trackId: schema.catalogInsights.trackId, body: schema.catalogInsights.body })
+    .from(schema.catalogInsights)
+    .where(and(eq(schema.catalogInsights.artistId, artistId), eq(schema.catalogInsights.isDismissed, false)))
+    .orderBy(desc(schema.catalogInsights.createdAt)),
+
+    db.select({
+      trackId:   schema.trackLifecycleMetrics.trackId,
+      weekStart: schema.trackLifecycleMetrics.weekStart,
+      streams:   schema.trackLifecycleMetrics.streams,
+    })
+    .from(schema.trackLifecycleMetrics)
+    .innerJoin(schema.catalogTracks, eq(schema.trackLifecycleMetrics.trackId, schema.catalogTracks.trackId))
+    .where(eq(schema.catalogTracks.artistId, artistId))
+    .orderBy(asc(schema.trackLifecycleMetrics.trackId), asc(schema.trackLifecycleMetrics.weekStart)),
+  ]);
+
+  const insightMap = new Map<string, string>();
+  for (const r of insightRows) {
+    if (r.trackId && !insightMap.has(r.trackId)) insightMap.set(r.trackId, r.body);
+  }
+
+  const metricsMap = new Map<string, { date: string; value: number }[]>();
+  for (const r of metricsRows) {
+    const arr = metricsMap.get(r.trackId) ?? [];
+    arr.push({ date: `W${arr.length + 1}`, value: r.streams });
+    metricsMap.set(r.trackId, arr);
+  }
+
+  return rows.map(r => ({
+    trackId:        r.trackId,
+    title:          r.trackTitle,
+    slug:           r.trackSlug,
+    genres:         r.genres,
+    phase:          r.lifecyclePhase,
+    evergreenScore: r.evergreenScore,
+    decayRate:      Number(r.decayRatePct ?? 0),
+    revivalPotential: r.revivalPotential,
+    peakStreams:    r.peakStreams ?? 0,
+    currentMonthly: r.currentMonthlyStreams,
+    totalPlaylists: r.totalPlaylists,
+    aiNote:         insightMap.get(r.trackId) ?? `${r.lifecyclePhase} phase track.`,
+    weeklyTrend:    metricsMap.get(r.trackId) ?? [],
+  }));
+}
+
+export async function getCatalogInsights(artistId: string) {
+  return db.select({
+    id:          schema.catalogInsights.id,
+    trackId:     schema.catalogInsights.trackId,
+    insightType: schema.catalogInsights.insightType,
+    title:       schema.catalogInsights.title,
+    body:        schema.catalogInsights.body,
+    action:      schema.catalogInsights.action,
+    urgency:     schema.catalogInsights.urgency,
+    isDismissed: schema.catalogInsights.isDismissed,
+    trackTitle:  schema.tracks.title,
+    trackSlug:   schema.tracks.slug,
+    createdAt:   schema.catalogInsights.createdAt,
+  })
+  .from(schema.catalogInsights)
+  .leftJoin(schema.tracks, eq(schema.catalogInsights.trackId, schema.tracks.id))
+  .where(and(eq(schema.catalogInsights.artistId, artistId), eq(schema.catalogInsights.isDismissed, false)))
+  .orderBy(asc(schema.catalogInsights.urgency), desc(schema.catalogInsights.createdAt));
+}
+
+// ── Fan Intel ─────────────────────────────────────────────────────────────────
+
+export async function getFanScoreLeaderboard(artistId: string, limit = 10) {
+  return db.select({
+    fanId:             schema.fanScores.fanId,
+    displayName:       schema.fans.displayName,
+    city:              schema.fans.city,
+    country:           schema.fans.country,
+    ltvScore:          schema.fanScores.ltvScore,
+    cluster:           schema.fanScores.cluster,
+    engagement30d:     schema.fanScores.engagement30d,
+    spendPotentialUsd: schema.fanScores.spendPotentialUsd,
+    telegramConverted: schema.fanScores.telegramConverted,
+    emailConverted:    schema.fanScores.emailConverted,
+  })
+  .from(schema.fanScores)
+  .innerJoin(schema.fans, eq(schema.fanScores.fanId, schema.fans.id))
+  .where(eq(schema.fanScores.artistId, artistId))
+  .orderBy(desc(schema.fanScores.ltvScore))
+  .limit(limit);
+}
+
+export async function getFanClusterSummary(artistId: string) {
+  const BADGES: Record<string, string> = {
+    superfan: "bg-emerald/10 text-emerald border-emerald/20",
+    core:     "bg-cyan/10 text-cyan border-cyan/20",
+    casual:   "bg-violet/10 text-violet border-violet/20",
+    dormant:  "bg-white/5 text-muted-foreground border-white/10",
+    new:      "bg-amber/10 text-amber border-amber/20",
+  };
+  const DESCS: Record<string, string> = {
+    superfan: "Your highest-value fans. Active, loyal, and likely to buy merchandise and tickets.",
+    core:     "Consistent listeners. High potential to convert to superfan tier with the right campaign.",
+    casual:   "Occasional listeners. High spend potential but low current engagement.",
+    dormant:  "Previously active but no engagement in 30+ days. Candidate for reactivation campaigns.",
+    new:      "Recently joined. Haven't yet formed strong engagement patterns.",
+  };
+
+  const rows = await db.select({
+    cluster:     schema.fanScores.cluster,
+    cnt:         count(),
+    avgLtv:      avg(schema.fanScores.ltvScore),
+    avgSpend:    avg(schema.fanScores.spendPotentialUsd),
+    telegramCnt: sum(sql<number>`CASE WHEN ${schema.fanScores.telegramConverted} = true THEN 1 ELSE 0 END`),
+  })
+  .from(schema.fanScores)
+  .where(eq(schema.fanScores.artistId, artistId))
+  .groupBy(schema.fanScores.cluster);
+
+  return rows.map(r => ({
+    cluster:     r.cluster,
+    count:       Number(r.cnt),
+    avgLtv:      Math.round(Number(r.avgLtv ?? 0)),
+    avgSpend:    Math.round(Number(r.avgSpend ?? 0)),
+    telegramPct: Number(r.cnt) > 0 ? Math.round((Number(r.telegramCnt ?? 0) / Number(r.cnt)) * 100) : 0,
+    badge:       BADGES[r.cluster] ?? "",
+    desc:        DESCS[r.cluster] ?? "",
+  }));
+}
+
+export async function getFanLocationHeatmap(artistId: string, limit = 10) {
+  const rows = await db.select()
+    .from(schema.fanLocations)
+    .where(eq(schema.fanLocations.artistId, artistId))
+    .orderBy(desc(schema.fanLocations.fanCount))
+    .limit(limit);
+
+  return rows.map(r => ({
+    city:       r.city ?? r.country,
+    country:    r.country,
+    cc:         r.countryCode,
+    fans:       r.fanCount,
+    superfans:  r.superfanCount,
+    telegram:   r.telegramCount,
+    engIndex:   r.engagementIndex,
+    flag:       FLAGS[r.countryCode] ?? "🌍",
+  }));
+}
+
+export async function getFanIntelMetrics(artistId: string) {
+  const [totalFansRow, superfansRow, avgLtvRow, telegramTotalRow, listenerRow] = await Promise.all([
+    db.select({ cnt: count() }).from(schema.fans).where(eq(schema.fans.artistId, artistId)),
+    db.select({ cnt: count() }).from(schema.fanScores).where(and(eq(schema.fanScores.artistId, artistId), eq(schema.fanScores.cluster, "superfan"))),
+    db.select({ val: avg(schema.fanScores.ltvScore) }).from(schema.fanScores).where(eq(schema.fanScores.artistId, artistId)),
+    db.select({ total: sum(schema.fanLocations.telegramCount) }).from(schema.fanLocations).where(eq(schema.fanLocations.artistId, artistId)),
+    db.select({ total: sum(schema.platformTrackMetricsDaily.listeners) })
+      .from(schema.platformTrackMetricsDaily)
+      .innerJoin(schema.tracks, eq(schema.platformTrackMetricsDaily.trackId, schema.tracks.id))
+      .where(eq(schema.tracks.artistId, artistId)),
+  ]);
+
+  const totalFans    = Number(totalFansRow[0]?.cnt ?? 0);
+  const superfans    = Number(superfansRow[0]?.cnt ?? 0);
+  const avgLtv       = Math.round(Number(avgLtvRow[0]?.val ?? 0));
+  const telegramTotal = Number(telegramTotalRow[0]?.total ?? 0);
+  const listeners    = Number(listenerRow[0]?.total ?? 0);
+  const overallCvr   = listeners > 0 ? Math.round((totalFans / listeners) * 100 * 10) / 10 : 0;
+
+  return {
+    totalFans,
+    superfans,
+    avgLtv,
+    telegramTotal,
+    listeners,
+    overallCvr,
+    funnel: [
+      { stage: "Listeners",         count: listeners,     color: "#22d3ee" },
+      { stage: "Owned Audience",    count: totalFans,     color: "#a78bfa" },
+      { stage: "Telegram Community", count: telegramTotal, color: "#60a5fa" },
+      { stage: "Superfans",         count: superfans,     color: "#34d399" },
+    ],
+  };
+}
+
+// ── Releases ──────────────────────────────────────────────────────────────────
+
+export async function getReleasesWithDetails(artistId: string) {
+  return db.query.releases.findMany({
+    where: eq(schema.releases.artistId, artistId),
+    with: { assets: true, checklists: true, campaigns: true },
+    orderBy: [asc(schema.releases.releaseDate)],
+  });
+}
+
+// ── Sync ──────────────────────────────────────────────────────────────────────
+
+export async function getSyncOpportunities(artistId: string) {
+  return db.query.syncOpportunities.findMany({
+    where: eq(schema.syncOpportunities.artistId, artistId),
+    with: { supervisor: true, pitches: true },
+    orderBy: [asc(schema.syncOpportunities.deadline)],
+  });
+}
+
+export async function getSyncPitches(artistId: string) {
+  return db.query.syncPitches.findMany({
+    where: eq(schema.syncPitches.artistId, artistId),
+    with: {
+      opportunity: { with: { supervisor: true } },
+      track: true,
+    },
+    orderBy: [desc(schema.syncPitches.createdAt)],
+  });
+}
+
+export async function getMusicSupervisorsWithOpps() {
+  const [supervisors, openOpps] = await Promise.all([
+    db.select().from(schema.musicSupervisors).orderBy(desc(schema.musicSupervisors.dealCount)),
+    db.select({
+      supervisorId: schema.syncOpportunities.supervisorId,
+      cnt:          count(),
+    })
+    .from(schema.syncOpportunities)
+    .where(eq(schema.syncOpportunities.status, "open"))
+    .groupBy(schema.syncOpportunities.supervisorId),
+  ]);
+
+  const oppsMap = new Map(openOpps.filter(o => o.supervisorId).map(o => [o.supervisorId!, Number(o.cnt)]));
+  return supervisors.map(s => ({ ...s, openOpps: oppsMap.get(s.id) ?? 0 }));
+}
+
+export async function getPlaylistHistory(artistId: string, limit = 20) {
+  const PLATFORM_NAMES_: Record<string, string> = {
+    spotify: "Spotify", apple_music: "Apple Music", audiomack: "Audiomack",
+    boomplay: "Boomplay", youtube: "YouTube", soundcloud: "SoundCloud",
+  };
+  const rows = await db.select({
+    id:            schema.playlistHistory.id,
+    trackTitle:    schema.tracks.title,
+    playlistName:  schema.playlistHistory.playlistName,
+    platformSlug:  schema.playlistHistory.platformSlug,
+    followerCount: schema.playlistHistory.followerCount,
+    addedAt:       schema.playlistHistory.addedAt,
+    removedAt:     schema.playlistHistory.removedAt,
+    peakPosition:  schema.playlistHistory.peakPosition,
+    impactStreams:  schema.playlistHistory.impactStreams,
+  })
+  .from(schema.playlistHistory)
+  .innerJoin(schema.tracks, eq(schema.playlistHistory.trackId, schema.tracks.id))
+  .where(eq(schema.playlistHistory.artistId, artistId))
+  .orderBy(desc(schema.playlistHistory.addedAt))
+  .limit(limit);
+
+  return rows.map(r => ({
+    ...r,
+    platformName: PLATFORM_NAMES_[r.platformSlug] ?? r.platformSlug,
+  }));
+}
+
+export async function getTrackSyncLibrary(artistId: string) {
+  const [profiles, pitchCounts] = await Promise.all([
+    db.select({
+      trackId:          schema.trackSyncProfiles.trackId,
+      trackTitle:       schema.tracks.title,
+      trackSlug:        schema.tracks.slug,
+      genres:           schema.tracks.genres,
+      durationSec:      schema.tracks.durationSec,
+      bpm:              schema.trackSyncProfiles.bpm,
+      musicalKey:       schema.trackSyncProfiles.musicalKey,
+      moods:            schema.trackSyncProfiles.moods,
+      energyLevel:      schema.trackSyncProfiles.energyLevel,
+      cinematicFitScore: schema.trackSyncProfiles.cinematicFitScore,
+      sceneTypes:       schema.trackSyncProfiles.sceneTypes,
+      hasCleanVersion:  schema.trackSyncProfiles.hasCleanVersion,
+      lyricType:        schema.trackSyncProfiles.lyricType,
+      syncScore:        schema.trackSyncProfiles.syncScore,
+    })
+    .from(schema.trackSyncProfiles)
+    .innerJoin(schema.tracks, eq(schema.trackSyncProfiles.trackId, schema.tracks.id))
+    .where(eq(schema.tracks.artistId, artistId))
+    .orderBy(desc(schema.trackSyncProfiles.syncScore)),
+
+    db.select({
+      trackId:  schema.syncPitches.trackId,
+      total:    count(),
+      licensed: sum(sql<number>`CASE WHEN ${schema.syncPitches.status} = 'licensed' THEN 1 ELSE 0 END`),
+    })
+    .from(schema.syncPitches)
+    .where(eq(schema.syncPitches.artistId, artistId))
+    .groupBy(schema.syncPitches.trackId),
+  ]);
+
+  const pitchMap = new Map(pitchCounts.map(p => [p.trackId, {
+    total: Number(p.total), licensed: Number(p.licensed ?? 0),
+  }]));
+
+  return profiles.map(p => ({
+    ...p,
+    pitchCount:    pitchMap.get(p.trackId)?.total ?? 0,
+    licensedCount: pitchMap.get(p.trackId)?.licensed ?? 0,
+  }));
 }
