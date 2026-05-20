@@ -7,7 +7,7 @@ interface TrendPayload { artistSlug: string }
 interface TelegramPayload { channelId: string }
 
 export function registerIntelligenceWorkers(queue: PgBoss): void {
-  queue.work<TrendPayload>(QUEUE.TREND_DETECT, { teamSize: 1 }, async (job) => {
+  queue.work<TrendPayload>(QUEUE.TREND_DETECT, { batchSize: 1 }, async ([job]) => {
     const { artistSlug } = job.data;
     console.log(`[intelligence] Trend detection for ${artistSlug}`);
 
@@ -20,7 +20,7 @@ export function registerIntelligenceWorkers(queue: PgBoss): void {
     console.log(`[intelligence] ${breakouts.length} breakouts, ${decays.length} decays detected`);
   });
 
-  queue.work<TelegramPayload>(QUEUE.TELEGRAM_SNAP, { teamSize: 1 }, async (job) => {
+  queue.work<TelegramPayload>(QUEUE.TELEGRAM_SNAP, { batchSize: 1 }, async ([job]) => {
     const { channelId } = job.data;
     console.log(`[intelligence] Telegram snapshot for ${channelId}`);
 

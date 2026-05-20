@@ -9,7 +9,7 @@ import { format } from "date-fns";
 interface DailyMetricsPayload { artistSlug: string }
 
 export function registerDailyMetricsWorker(queue: PgBoss): void {
-  queue.work<DailyMetricsPayload>(QUEUE.DAILY_METRICS, { teamSize: 1 }, async (job) => {
+  queue.work<DailyMetricsPayload>(QUEUE.DAILY_METRICS, { batchSize: 1 }, async ([job]) => {
     const { artistSlug } = job.data;
     console.log(`[daily-metrics] Starting for ${artistSlug}`);
 
@@ -34,7 +34,7 @@ export function registerDailyMetricsWorker(queue: PgBoss): void {
 interface FanScoringPayload { artistSlug: string }
 
 export function registerFanScoringWorker(queue: PgBoss): void {
-  queue.work<FanScoringPayload>(QUEUE.FAN_SCORING, { teamSize: 1 }, async (job) => {
+  queue.work<FanScoringPayload>(QUEUE.FAN_SCORING, { batchSize: 1 }, async ([job]) => {
     const { artistSlug } = job.data;
     console.log(`[fan-scoring] Starting for ${artistSlug}`);
 
